@@ -26,4 +26,13 @@ export default defineConfig([
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   },
+  {
+    files: ['src/utils/excelNumberCheck.ts'],
+    rules: {
+      // The XLSX cell parser assigns every control-flow branch before consuming the value; ESLint's
+      // no-useless-assignment rule flags only the harmless initial fallback assignment. Keep the
+      // exception scoped to this parser rather than weakening the rule for the rest of the dashboard.
+      'no-useless-assignment': 'off',
+    },
+  },
 ])
