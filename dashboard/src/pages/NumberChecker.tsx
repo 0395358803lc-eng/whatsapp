@@ -34,14 +34,7 @@ type CheckState =
   | { kind: 'error'; message: string };
 
 type BulkStatus =
-  | 'queued'
-  | 'checking'
-  | 'registered'
-  | 'not_registered'
-  | 'unavailable'
-  | 'invalid'
-  | 'error'
-  | 'cancelled';
+  'queued' | 'checking' | 'registered' | 'not_registered' | 'unavailable' | 'invalid' | 'error' | 'cancelled';
 
 interface BulkRow extends ExportNumberCheckRow {
   id: string;
@@ -157,7 +150,12 @@ export function NumberChecker() {
     setCountryCode(next);
     setState({ kind: 'idle' });
     if (!bulkRunning && bulkRows.length) {
-      setBulkRows(rows => createBulkRows(rows.map(row => ({ sourceRow: row.sourceRow, original: row.original })), next));
+      setBulkRows(rows =>
+        createBulkRows(
+          rows.map(row => ({ sourceRow: row.sourceRow, original: row.original })),
+          next,
+        ),
+      );
     }
   };
 
@@ -525,8 +523,8 @@ export function NumberChecker() {
               <div className="number-checker__bulk-notice">
                 <CircleAlert size={18} />
                 <span>
-                  Bulk checks run one at a time with a delay. Only check numbers you are authorized to contact; high-rate
-                  account enumeration can trigger WhatsApp restrictions.
+                  Bulk checks run one at a time with a delay. Only check numbers you are authorized to contact;
+                  high-rate account enumeration can trigger WhatsApp restrictions.
                 </span>
               </div>
               {bulkFileError && (
