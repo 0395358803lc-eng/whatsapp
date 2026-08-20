@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizePhoneNumber } from './phoneNumber';
+import { normalizePhoneNumber } from './phoneNumber.ts';
 
 test('normalizes Vietnamese national numbers with the default country code', () => {
   assert.deepEqual(normalizePhoneNumber('090 123 4567'), {
