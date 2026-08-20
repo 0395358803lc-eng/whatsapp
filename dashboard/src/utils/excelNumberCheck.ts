@@ -260,7 +260,10 @@ function resolveWorksheetPath(workbookXml: string, relsXml: string, entries: Zip
   return entries.find(entry => /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry.name))?.name ?? '';
 }
 
-function parseWorksheetRows(worksheetXml: string, sharedStrings: string[]): Array<{ rowNumber: number; values: string[] }> {
+function parseWorksheetRows(
+  worksheetXml: string,
+  sharedStrings: string[],
+): Array<{ rowNumber: number; values: string[] }> {
   const rows: Array<{ rowNumber: number; values: string[] }> = [];
   let implicitRow = 0;
 
@@ -276,7 +279,7 @@ function parseWorksheetRows(worksheetXml: string, sharedStrings: string[]): Arra
       const ref = attrs.match(/\br=["']([^"']+)["']/i)?.[1] ?? `${columnName(values.length)}${rowNumber}`;
       const index = columnIndex(ref);
       const type = attrs.match(/\bt=["']([^"']+)["']/i)?.[1] ?? '';
-      let value = '';
+      let value: string;
 
       if (type === 'inlineStr') {
         value = extractTextRuns(inner);
@@ -511,12 +514,5 @@ export function buildNumberCheckResultsXlsx(rows: ExportNumberCheckRow[]): Uint8
 }
 
 export function buildNumberCheckTemplateXlsx(): Uint8Array {
-  return buildXlsxBytes(
-    [
-      ['phone_number'],
-      ['+84901234567'],
-      ['+14155552671'],
-    ],
-    'Phone Numbers',
-  );
+  return buildXlsxBytes([['phone_number'], ['+84901234567'], ['+14155552671']], 'Phone Numbers');
 }
