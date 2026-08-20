@@ -31,35 +31,28 @@ jobs:
 
           excel = Path('dashboard/src/utils/excelNumberCheck.ts')
           text = excel.read_text()
-          old = """      let value = '';
-
-      if (type === 'inlineStr') {
-"""
-          new = """      let value: string;
-
-      if (type === 'inlineStr') {
-"""
+          old = "      let value = '';\n\n      if (type === 'inlineStr') {\n"
+          new = "      let value: string;\n\n      if (type === 'inlineStr') {\n"
           if old in text:
-              text = text.replace(old, new, 1)
-              excel.write_text(text)
+              excel.write_text(text.replace(old, new, 1))
           elif 'let value: string;' not in text:
               raise SystemExit('Expected XLSX value initialization was not found')
 
           eslint = Path('dashboard/eslint.config.js')
           config = eslint.read_text()
-          workaround = """  {
-    files: ['src/utils/excelNumberCheck.ts'],
-    rules: {
-      // XLSX cells are assigned through multiple mutually-exclusive type branches.
-      // Keeping one typed local makes the parser easier to audit than duplicating
-      // indexed writes inside every branch.
-      'no-useless-assignment': 'off',
-    },
-  },
-"""
+          workaround = (
+              "  {\n"
+              "    files: ['src/utils/excelNumberCheck.ts'],\n"
+              "    rules: {\n"
+              "      // XLSX cells are assigned through multiple mutually-exclusive type branches.\n"
+              "      // Keeping one typed local makes the parser easier to audit than duplicating\n"
+              "      // indexed writes inside every branch.\n"
+              "      'no-useless-assignment': 'off',\n"
+              "    },\n"
+              "  },\n"
+          )
           if workaround in config:
-              config = config.replace(workaround, '', 1)
-              eslint.write_text(config)
+              eslint.write_text(config.replace(workaround, '', 1))
 
       - name: Install dashboard dependencies
         run: cd dashboard && npm ci
