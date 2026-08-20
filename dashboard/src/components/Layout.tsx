@@ -11,6 +11,7 @@ import {
   ClipboardList,
   LogOut,
   Send,
+  SearchCheck,
   Server,
   Puzzle,
   Sun,
@@ -41,6 +42,7 @@ const allNavItems = [
   { to: '/templates', icon: ClipboardList, key: 'templates' as const, adminOnly: false },
   { to: '/api-keys', icon: Key, key: 'apiKeys' as const, adminOnly: true },
   { to: '/message-tester', icon: Send, key: 'messageTester' as const, adminOnly: false },
+  { to: '/number-checker', icon: SearchCheck, key: 'numberChecker' as const, adminOnly: false },
   // Backend /infra/* is ADMIN-only; hide the nav item from non-admins (UX + defense-in-depth).
   { to: '/infrastructure', icon: Server, key: 'infrastructure' as const, adminOnly: true },
   { to: '/plugins', icon: Puzzle, key: 'plugins' as const, adminOnly: true },
@@ -186,7 +188,7 @@ export function Layout({ onLogout, userRole }: LayoutProps) {
 
         <nav className="sidebar-nav">
           {navItems.map(({ to, icon: Icon, key }) => {
-            const label = t(`nav.${key}`);
+            const label = t(`nav.${key}`, { defaultValue: key === 'numberChecker' ? 'WhatsApp Checker' : key });
             return (
               <NavLink
                 key={to}
