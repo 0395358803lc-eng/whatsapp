@@ -97,6 +97,7 @@ export class ContactController {
   }
 
   @Get('check/:number')
+  @RequireRole(ApiKeyRole.OPERATOR)
   @ApiOperation({
     summary: 'Check if a phone number exists on WhatsApp',
     description:
