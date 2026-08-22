@@ -1,5 +1,8 @@
+import { BadRequestException } from '@nestjs/common';
 import { ContactController } from './contact.controller';
 import { ContactService } from './contact.service';
+import { REQUIRED_ROLE_KEY } from '../auth/decorators/auth.decorators';
+import { ApiKeyRole } from '../auth/entities/api-key.entity';
 
 describe('ContactController', () => {
   const service = {
@@ -50,21 +53,30 @@ describe('ContactController', () => {
     expect(service.getContactById).toHaveBeenCalledWith('s1', 'c1');
   });
 
+  it('requires operator permission for number checks', () => {
+    expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, ContactController.prototype.checkNumber)).toBe(ApiKeyRole.OPERATOR);
+  });
+
+  it.each(['123456', '01234567', '1234567890123456', '62812abc'])('rejects invalid canonical MSISDN %s before the engine', async number => {
+    await expect(controller.checkNumber('s1', number)).rejects.toBeInstanceOf(BadRequestException);
+    expect(service.getNumberId).not.toHaveBeenCalled();
+  });
+
   it('checkNumber maps a null whatsappId to exists:false', async () => {
     service.getNumberId.mockResolvedValue(null);
-    await expect(controller.checkNumber('s1', '628123')).resolves.toEqual({
-      number: '628123',
+    await expect(controller.checkNumber('s1', '6281234')).resolves.toEqual({
+      number: '6281234',
       exists: false,
       whatsappId: null,
     });
   });
 
   it('checkNumber returns the canonical id when the number exists', async () => {
-    service.getNumberId.mockResolvedValue('628123@c.us');
-    await expect(controller.checkNumber('s1', '628123')).resolves.toEqual({
-      number: '628123',
+    service.getNumberId.mockResolvedValue('6281234@c.us');
+    await expect(controller.checkNumber('s1', '6281234')).resolves.toEqual({
+      number: '6281234',
       exists: true,
-      whatsappId: '628123@c.us',
+      whatsappId: '6281234@c.us',
     });
   });
 
@@ -75,10 +87,7 @@ describe('ContactController', () => {
 
   it('resolvePhone wraps contactId and phone', async () => {
     service.resolveContactPhone.mockResolvedValue('628123456789');
-    await expect(controller.resolvePhone('s1', '123@lid')).resolves.toEqual({
-      contactId: '123@lid',
-      phone: '628123456789',
-    });
+    await expect(controller.resolvePhone('s1', '123@lid')).resolves.toEqual({ contactId: '123@lid', phone: '628123456789' });
   });
 
   it('getBlockedContacts returns the service list as a bare array', async () => {
@@ -89,10 +98,7 @@ describe('ContactController', () => {
 
   it('upsertContact passes first/last name from the DTO', async () => {
     service.upsertContact.mockResolvedValue(undefined);
-    await expect(controller.upsertContact('s1', 'c1', { firstName: 'A', lastName: 'B' })).resolves.toEqual({
-      success: true,
-      message: 'Contact saved',
-    });
+    await expect(controller.upsertContact('s1', 'c1', { firstName: 'A', lastName: 'B' })).resolves.toEqual({ success: true, message: 'Contact saved' });
     expect(service.upsertContact).toHaveBeenCalledWith('s1', 'c1', 'A', 'B');
   });
 

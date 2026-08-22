@@ -15,13 +15,16 @@ import { PageHeader } from '../components/PageHeader';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useSessionsQuery } from '../hooks/queries';
 import { contactApi, type CheckNumberResponse } from '../services/api';
+import { checkNumberWithRetry, NumberCheckFailure } from '../services/numberCheckApi';
 import {
   buildNumberCheckResultsXlsx,
   buildNumberCheckTemplateXlsx,
   MAX_BULK_PHONE_ROWS,
+  PhoneColumnRequiredError,
   readPhoneRowsFromFile,
   type ExportNumberCheckRow,
   type ImportedPhoneRow,
+  type PhoneColumnOption,
 } from '../utils/excelNumberCheck';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
 import './NumberChecker.css';
@@ -51,8 +54,24 @@ const TERMINAL_BULK_STATUSES = new Set<BulkStatus>([
   'cancelled',
 ]);
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function downloadXlsx(bytes: Uint8Array, filename: string): void {
@@ -118,7 +137,10 @@ export function NumberChecker() {
   const [bulkFileError, setBulkFileError] = useState('');
   const [bulkRunning, setBulkRunning] = useState(false);
   const [bulkDelayMs, setBulkDelayMs] = useState(2000);
-  const stopBulkRef = useRef(false);
+  const [pendingBulkFile, setPendingBulkFile] = useState<File | null>(null);
+  const [phoneColumnOptions, setPhoneColumnOptions] = useState<PhoneColumnOption[]>([]);
+  const [selectedPhoneColumn, setSelectedPhoneColumn] = useState('');
+  const bulkAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!readySessions.length) {
@@ -127,6 +149,8 @@ export function NumberChecker() {
     }
     if (!readySessions.some(item => item.id === sessionId)) setSessionId(readySessions[0].id);
   }, [readySessions, sessionId]);
+
+  useEffect(() => () => bulkAbortRef.current?.abort(), []);
 
   const normalized = normalizePhoneNumber(phone, countryCode);
   const canCheck = Boolean(sessionId && normalized.valid && state.kind !== 'checking');
@@ -179,20 +203,52 @@ export function NumberChecker() {
     }
   };
 
+  const clearColumnSelection = () => {
+    setPendingBulkFile(null);
+    setPhoneColumnOptions([]);
+    setSelectedPhoneColumn('');
+  };
+
+  const applyImportedRows = (file: File, imported: ImportedPhoneRow[]) => {
+    if (!imported.length) throw new Error('No phone numbers were found in the first worksheet.');
+    setBulkFileName(file.name);
+    setBulkRows(createBulkRows(imported, countryCode));
+    setBulkFileError('');
+    clearColumnSelection();
+  };
+
   const handleBulkFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || bulkRunning) return;
     setBulkFileError('');
+    clearColumnSelection();
     try {
-      const imported = await readPhoneRowsFromFile(file);
-      if (!imported.length) throw new Error('No phone numbers were found in the first worksheet.');
-      setBulkFileName(file.name);
-      setBulkRows(createBulkRows(imported, countryCode));
+      applyImportedRows(file, await readPhoneRowsFromFile(file));
     } catch (error) {
-      setBulkFileName('');
       setBulkRows([]);
-      setBulkFileError(error instanceof Error ? error.message : 'Could not read this file.');
+      if (error instanceof PhoneColumnRequiredError) {
+        setBulkFileName(file.name);
+        setPendingBulkFile(file);
+        setPhoneColumnOptions(error.columns);
+        setSelectedPhoneColumn(error.columns[0] ? String(error.columns[0].index) : '');
+        setBulkFileError('No recognized phone header was found. Choose the phone column before importing.');
+      } else {
+        setBulkFileName('');
+        setBulkFileError(error instanceof Error ? error.message : 'Could not read this file.');
+      }
+    }
+  };
+
+  const handleUseSelectedPhoneColumn = async () => {
+    if (!pendingBulkFile || selectedPhoneColumn === '' || bulkRunning) return;
+    setBulkFileError('');
+    try {
+      const imported = await readPhoneRowsFromFile(pendingBulkFile, Number(selectedPhoneColumn));
+      applyImportedRows(pendingBulkFile, imported);
+    } catch (error) {
+      setBulkRows([]);
+      setBulkFileError(error instanceof Error ? error.message : 'Could not read the selected phone column.');
     }
   };
 
@@ -217,7 +273,10 @@ export function NumberChecker() {
 
   const handleStartBulk = async () => {
     if (!sessionId || bulkRunning || !bulkRows.length) return;
-    stopBulkRef.current = false;
+
+    bulkAbortRef.current?.abort();
+    const controller = new AbortController();
+    bulkAbortRef.current = controller;
     setBulkRunning(true);
     setBulkFileError('');
 
@@ -229,8 +288,15 @@ export function NumberChecker() {
 
     type CachedResult = Pick<BulkRow, 'status' | 'whatsappId' | 'details' | 'checkedAt'>;
     const cache = new Map<string, CachedResult>();
+    let consecutiveTransportFailures = 0;
     const publish = (index: number, patch: Partial<BulkRow>) => {
       working[index] = { ...working[index], ...patch };
+      setBulkRows([...working]);
+    };
+    const stopRemaining = (message: string) => {
+      working = working.map(item =>
+        item.status === 'queued' ? { ...item, status: 'cancelled' as const, details: message } : item,
+      );
       setBulkRows([...working]);
     };
 
@@ -238,11 +304,7 @@ export function NumberChecker() {
       for (let index = 0; index < working.length; index += 1) {
         const row = working[index];
         if (row.status === 'invalid') continue;
-        if (stopBulkRef.current) {
-          working = working.map(item => (item.status === 'queued' ? { ...item, status: 'cancelled' as const } : item));
-          setBulkRows([...working]);
-          break;
-        }
+        if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
         const cached = cache.get(row.normalized);
         if (cached) {
@@ -256,46 +318,122 @@ export function NumberChecker() {
         }
 
         publish(index, { status: 'checking', details: 'Querying WhatsApp…' });
-        let cachedResult: CachedResult;
+        let result: CachedResult;
         try {
-          const data = await contactApi.checkNumber(sessionId, row.normalized);
-          cachedResult = {
+          const data = await checkNumberWithRetry(sessionId, row.normalized, controller.signal, notice => {
+            const seconds = Math.max(1, Math.ceil(notice.delayMs / 1000));
+            publish(index, {
+              status: 'checking',
+              details: `Temporary lookup failure${notice.status ? ` (${notice.status})` : ''}; retrying in ${seconds}s…`,
+            });
+          });
+          consecutiveTransportFailures = 0;
+          result = {
             status: data.exists ? 'registered' : 'not_registered',
             whatsappId: data.whatsappId,
             details: data.exists ? 'WhatsApp account confirmed.' : 'WhatsApp confirmed no account for this number.',
             checkedAt: new Date().toISOString(),
           };
+          cache.set(row.normalized, result);
         } catch (error) {
-          const requestError = error as Error & { status?: number };
-          cachedResult = {
-            status: requestError.status === 503 ? 'unavailable' : 'error',
-            whatsappId: null,
-            details:
-              requestError.status === 503
-                ? 'WhatsApp did not answer; no registration conclusion was recorded.'
-                : requestError.message || 'Number check failed.',
-            checkedAt: new Date().toISOString(),
-          };
-        }
-        cache.set(row.normalized, cachedResult);
-        publish(index, cachedResult);
+          if (isAbortError(error)) throw error;
 
-        if (!stopBulkRef.current && index < working.length - 1) await sleep(bulkDelayMs);
+          if (error instanceof NumberCheckFailure) {
+            if (error.kind === 'auth') {
+              publish(index, {
+                status: 'error',
+                whatsappId: null,
+                details: 'Authorization failed. Refresh credentials before continuing.',
+                checkedAt: new Date().toISOString(),
+              });
+              stopRemaining('Stopped because authorization failed.');
+              setBulkFileError('Bulk check stopped: the API key is missing, expired, or lacks permission.');
+              return;
+            }
+            if (error.kind === 'session') {
+              publish(index, {
+                status: 'error',
+                whatsappId: null,
+                details: 'Session is not ready for number checks.',
+                checkedAt: new Date().toISOString(),
+              });
+              stopRemaining('Stopped because the selected session is not ready.');
+              setBulkFileError('Bulk check stopped: the selected WhatsApp session is no longer ready.');
+              return;
+            }
+            if (error.kind === 'invalid') {
+              consecutiveTransportFailures = 0;
+              result = {
+                status: 'invalid',
+                whatsappId: null,
+                details: `Server rejected this number: ${error.message}`,
+                checkedAt: new Date().toISOString(),
+              };
+            } else if (error.kind === 'unavailable') {
+              consecutiveTransportFailures += 1;
+              result = {
+                status: 'unavailable',
+                whatsappId: null,
+                details: `No registration conclusion after bounded retries: ${error.message}`,
+                checkedAt: new Date().toISOString(),
+              };
+            } else {
+              consecutiveTransportFailures = 0;
+              result = {
+                status: 'error',
+                whatsappId: null,
+                details: error.message || 'Number check failed.',
+                checkedAt: new Date().toISOString(),
+              };
+            }
+          } else {
+            consecutiveTransportFailures += 1;
+            const requestError = error as Error;
+            result = {
+              status: 'unavailable',
+              whatsappId: null,
+              details: requestError.message || 'Number check failed without a registration conclusion.',
+              checkedAt: new Date().toISOString(),
+            };
+          }
+        }
+
+        publish(index, result);
+
+        if (consecutiveTransportFailures >= 3) {
+          stopRemaining('Stopped after repeated transport/rate-limit failures.');
+          setBulkFileError('Bulk check paused after 3 consecutive transport or rate-limit failures.');
+          return;
+        }
+
+        if (index < working.length - 1) await abortableSleep(bulkDelayMs, controller.signal);
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        working = working.map(item =>
+          item.status === 'queued' || item.status === 'checking'
+            ? { ...item, status: 'cancelled' as const, details: 'Stopped by operator.' }
+            : item,
+        );
+        setBulkRows([...working]);
+      } else {
+        setBulkFileError(error instanceof Error ? error.message : 'Bulk number check failed.');
       }
     } finally {
+      if (bulkAbortRef.current === controller) bulkAbortRef.current = null;
       setBulkRunning(false);
     }
   };
 
   const handleStopBulk = () => {
-    stopBulkRef.current = true;
+    bulkAbortRef.current?.abort();
   };
 
   return (
     <div className="number-checker">
       <PageHeader
         title="WhatsApp Number Checker"
-        subtitle="Verify one recipient or process an authorized Excel list with live progress and exportable results."
+        subtitle="Check WhatsApp registration for one number or process an authorized Excel list with live progress and exportable results."
       />
 
       <div className="number-checker__tabs" role="tablist" aria-label="Number checker mode">
@@ -408,7 +546,7 @@ export function NumberChecker() {
                 <CheckCircle2 size={30} />
                 <div>
                   <strong>WhatsApp account found</strong>
-                  <p>This number is registered and can be addressed by the selected session.</p>
+                  <p>This number is registered on WhatsApp. Registration does not guarantee message delivery.</p>
                   <dl>
                     <div>
                       <dt>Number</dt>
@@ -517,9 +655,35 @@ export function NumberChecker() {
 
               <p className="number-checker__hint">
                 The first worksheet is read. Use a column named <code>phone_number</code>, <code>phone</code>,{' '}
-                <code>mobile</code>, <code>msisdn</code>, or <code>Số điện thoại</code>. Maximum {MAX_BULK_PHONE_ROWS}{' '}
-                non-empty rows per file.
+                <code>mobile</code>, <code>msisdn</code>, or <code>Số điện thoại</code>. If no known header is found,
+                you must choose the phone column explicitly. Maximum {MAX_BULK_PHONE_ROWS} non-empty rows per file.
               </p>
+              {pendingBulkFile && phoneColumnOptions.length > 0 && (
+                <div className="number-checker__bulk-row">
+                  <label>
+                    Phone column
+                    <select
+                      value={selectedPhoneColumn}
+                      onChange={event => setSelectedPhoneColumn(event.target.value)}
+                      disabled={bulkRunning}
+                    >
+                      {phoneColumnOptions.map(option => (
+                        <option key={option.index} value={option.index}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="number-checker__secondary"
+                    onClick={handleUseSelectedPhoneColumn}
+                    disabled={bulkRunning || selectedPhoneColumn === ''}
+                  >
+                    Use selected column
+                  </button>
+                </div>
+              )}
               <div className="number-checker__bulk-notice">
                 <CircleAlert size={18} />
                 <span>

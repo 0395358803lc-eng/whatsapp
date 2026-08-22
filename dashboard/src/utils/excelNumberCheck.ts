@@ -1,6 +1,7 @@
 export interface ImportedPhoneRow {
   sourceRow: number;
   original: string;
+  unsafeNumeric?: boolean;
 }
 
 export interface ExportNumberCheckRow {
@@ -11,6 +12,24 @@ export interface ExportNumberCheckRow {
   whatsappId?: string | null;
   details?: string;
   checkedAt?: string;
+}
+
+export interface PhoneColumnOption {
+  index: number;
+  label: string;
+}
+
+export class PhoneColumnRequiredError extends Error {
+  constructor(public readonly columns: PhoneColumnOption[]) {
+    super('No recognized phone-number header was found. Select the phone column explicitly.');
+    this.name = 'PhoneColumnRequiredError';
+  }
+}
+
+interface ParsedRow {
+  rowNumber: number;
+  values: string[];
+  numericColumns?: Set<number>;
 }
 
 const PHONE_HEADERS = new Set([
@@ -33,6 +52,11 @@ const PHONE_HEADERS = new Set([
 ]);
 
 const MAX_XLSX_BYTES = 8 * 1024 * 1024;
+const MAX_CSV_BYTES = 4 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 256;
+const MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 16 * 1024 * 1024;
+const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_ZIP_COMPRESSION_RATIO = 200;
 export const MAX_BULK_PHONE_ROWS = 500;
 
 function normalizeHeader(value: string): string {
@@ -89,25 +113,36 @@ function extractTextRuns(xml: string): string {
   return parts.join('');
 }
 
-function selectPhoneRows(rows: Array<{ rowNumber: number; values: string[] }>): ImportedPhoneRow[] {
+function columnOptions(firstRow: string[]): PhoneColumnOption[] {
+  const width = Math.max(1, firstRow.length);
+  return Array.from({ length: width }, (_, index) => {
+    const header = (firstRow[index] ?? '').trim();
+    return {
+      index,
+      label: header ? `${columnName(index)} — ${header}` : `Column ${columnName(index)}`,
+    };
+  });
+}
+
+function selectPhoneRows(rows: ParsedRow[], explicitPhoneColumn?: number): ImportedPhoneRow[] {
   const firstIndex = rows.findIndex(row => row.values.some(value => value.trim()));
   if (firstIndex === -1) return [];
 
   const first = rows[firstIndex];
-  let phoneColumn = first.values.findIndex(value => PHONE_HEADERS.has(normalizeHeader(value)));
-  let dataStart = firstIndex + 1;
+  const detectedPhoneColumn = first.values.findIndex(value => PHONE_HEADERS.has(normalizeHeader(value)));
+  const phoneColumn = explicitPhoneColumn ?? detectedPhoneColumn;
 
-  if (phoneColumn === -1) {
-    phoneColumn = first.values.findIndex(value => value.trim());
-    dataStart = firstIndex;
+  if (phoneColumn < 0) throw new PhoneColumnRequiredError(columnOptions(first.values));
+  if (!Number.isInteger(phoneColumn) || phoneColumn >= Math.max(1, first.values.length)) {
+    throw new Error('The selected phone column is not present in this file.');
   }
-  if (phoneColumn === -1) return [];
 
   const result: ImportedPhoneRow[] = [];
-  for (let i = dataStart; i < rows.length; i += 1) {
+  for (let i = firstIndex + 1; i < rows.length; i += 1) {
     const original = (rows[i].values[phoneColumn] ?? '').trim();
     if (!original) continue;
-    result.push({ sourceRow: rows[i].rowNumber, original });
+    const unsafeNumeric = rows[i].numericColumns?.has(phoneColumn) || undefined;
+    result.push({ sourceRow: rows[i].rowNumber, original, ...(unsafeNumeric ? { unsafeNumeric: true } : {}) });
     if (result.length > MAX_BULK_PHONE_ROWS) {
       throw new Error(`The file contains more than ${MAX_BULK_PHONE_ROWS} phone rows. Split it into smaller files.`);
     }
@@ -135,7 +170,7 @@ function detectDelimiter(text: string): string {
   return winner;
 }
 
-export function parseDelimitedPhoneRows(text: string): ImportedPhoneRow[] {
+export function parseDelimitedPhoneRows(text: string, phoneColumn?: number): ImportedPhoneRow[] {
   const clean = text.replace(/^\uFEFF/, '');
   const delimiter = detectDelimiter(clean);
   const table: string[][] = [];
@@ -172,7 +207,10 @@ export function parseDelimitedPhoneRows(text: string): ImportedPhoneRow[] {
     }
   }
 
-  return selectPhoneRows(table.map((values, index) => ({ rowNumber: index + 1, values })));
+  return selectPhoneRows(
+    table.map((values, index) => ({ rowNumber: index + 1, values })),
+    phoneColumn,
+  );
 }
 
 interface ZipEntry {
@@ -183,7 +221,31 @@ interface ZipEntry {
   localHeaderOffset: number;
 }
 
+function assertZipEntryBudget(entry: ZipEntry, totalUncompressed: number): number {
+  if (entry.uncompressedSize === 0xffffffff || entry.compressedSize === 0xffffffff) {
+    throw new Error('Zip64 Excel files are not supported.');
+  }
+  if (entry.uncompressedSize > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
+    throw new Error(`Excel entry ${entry.name} is too large after decompression.`);
+  }
+  if (entry.uncompressedSize > 0 && entry.compressedSize === 0) {
+    throw new Error(`Excel entry ${entry.name} has an invalid compression size.`);
+  }
+  if (
+    entry.compressedSize > 0 &&
+    entry.uncompressedSize / entry.compressedSize > MAX_ZIP_COMPRESSION_RATIO
+  ) {
+    throw new Error(`Excel entry ${entry.name} has an unsafe compression ratio.`);
+  }
+  const nextTotal = totalUncompressed + entry.uncompressedSize;
+  if (nextTotal > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES) {
+    throw new Error('The Excel workbook expands beyond the safe uncompressed size limit.');
+  }
+  return nextTotal;
+}
+
 function findZipEntries(bytes: Uint8Array): ZipEntry[] {
+  if (bytes.length < 22) throw new Error('This .xlsx file is not a readable ZIP workbook.');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const min = Math.max(0, bytes.length - 65_557);
   let eocd = -1;
@@ -193,15 +255,20 @@ function findZipEntries(bytes: Uint8Array): ZipEntry[] {
       break;
     }
   }
-  if (eocd < 0) throw new Error('This .xlsx file is not a readable ZIP workbook.');
+  if (eocd < 0 || eocd + 22 > bytes.length) throw new Error('This .xlsx file is not a readable ZIP workbook.');
 
   const entriesCount = view.getUint16(eocd + 10, true);
+  if (entriesCount > MAX_ZIP_ENTRIES) throw new Error(`The Excel workbook contains too many ZIP entries.`);
   let offset = view.getUint32(eocd + 16, true);
+  if (offset > bytes.length) throw new Error('The .xlsx ZIP directory is malformed.');
   const decoder = new TextDecoder();
   const entries: ZipEntry[] = [];
+  let totalUncompressed = 0;
 
   for (let i = 0; i < entriesCount; i += 1) {
-    if (view.getUint32(offset, true) !== 0x02014b50) throw new Error('The .xlsx ZIP directory is malformed.');
+    if (offset + 46 > bytes.length || view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error('The .xlsx ZIP directory is malformed.');
+    }
     const flags = view.getUint16(offset + 8, true);
     if (flags & 0x1) throw new Error('Password-protected Excel files are not supported.');
     const method = view.getUint16(offset + 10, true);
@@ -211,23 +278,67 @@ function findZipEntries(bytes: Uint8Array): ZipEntry[] {
     const extraLength = view.getUint16(offset + 30, true);
     const commentLength = view.getUint16(offset + 32, true);
     const localHeaderOffset = view.getUint32(offset + 42, true);
+    const end = offset + 46 + nameLength + extraLength + commentLength;
+    if (end > bytes.length || localHeaderOffset >= bytes.length) throw new Error('The .xlsx ZIP directory is malformed.');
     const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
-    entries.push({ name, method, compressedSize, uncompressedSize, localHeaderOffset });
-    offset += 46 + nameLength + extraLength + commentLength;
+    const entry = { name, method, compressedSize, uncompressedSize, localHeaderOffset };
+    totalUncompressed = assertZipEntryBudget(entry, totalUncompressed);
+    entries.push(entry);
+    offset = end;
   }
   return entries;
+}
+
+async function readDeflatedEntry(stream: ReadableStream<Uint8Array>, entry: ZipEntry): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      const declaredLimit = entry.uncompressedSize || MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES;
+      if (total > declaredLimit || total > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
+        await reader.cancel('Excel entry exceeded its decompression budget');
+        throw new Error(`Excel entry ${entry.name} expands beyond the safe size limit.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = concat(chunks);
+  if (entry.uncompressedSize && output.length !== entry.uncompressedSize) {
+    throw new Error(`Excel entry ${entry.name} decompressed to an unexpected size.`);
+  }
+  return output;
 }
 
 async function readZipEntry(bytes: Uint8Array, entry: ZipEntry): Promise<Uint8Array> {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const offset = entry.localHeaderOffset;
-  if (view.getUint32(offset, true) !== 0x04034b50) throw new Error(`Invalid ZIP entry: ${entry.name}`);
+  if (offset + 30 > bytes.length || view.getUint32(offset, true) !== 0x04034b50) {
+    throw new Error(`Invalid ZIP entry: ${entry.name}`);
+  }
   const nameLength = view.getUint16(offset + 26, true);
   const extraLength = view.getUint16(offset + 28, true);
   const start = offset + 30 + nameLength + extraLength;
-  const compressed = bytes.subarray(start, start + entry.compressedSize);
+  const end = start + entry.compressedSize;
+  if (start > bytes.length || end > bytes.length || end < start) throw new Error(`Invalid ZIP entry: ${entry.name}`);
+  const compressed = bytes.subarray(start, end);
 
-  if (entry.method === 0) return compressed.slice();
+  if (entry.method === 0) {
+    const output = compressed.slice();
+    if (output.length > MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES) {
+      throw new Error(`Excel entry ${entry.name} exceeds the safe size limit.`);
+    }
+    if (entry.uncompressedSize && output.length !== entry.uncompressedSize) {
+      throw new Error(`Excel entry ${entry.name} has an unexpected stored size.`);
+    }
+    return output;
+  }
   if (entry.method !== 8) throw new Error(`Unsupported Excel compression method ${entry.method}.`);
   if (typeof DecompressionStream === 'undefined') throw new Error('This browser cannot decompress .xlsx files.');
 
@@ -236,11 +347,7 @@ async function readZipEntry(bytes: Uint8Array, entry: ZipEntry): Promise<Uint8Ar
     compressed.byteOffset + compressed.byteLength,
   ) as ArrayBuffer;
   const stream = new Blob([compressedBuffer]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  const output = new Uint8Array(await new Response(stream).arrayBuffer());
-  if (entry.uncompressedSize && output.length !== entry.uncompressedSize) {
-    throw new Error(`Excel entry ${entry.name} decompressed to an unexpected size.`);
-  }
-  return output;
+  return readDeflatedEntry(stream, entry);
 }
 
 function resolveWorksheetPath(workbookXml: string, relsXml: string, entries: ZipEntry[]): string {
@@ -260,11 +367,8 @@ function resolveWorksheetPath(workbookXml: string, relsXml: string, entries: Zip
   return entries.find(entry => /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry.name))?.name ?? '';
 }
 
-function parseWorksheetRows(
-  worksheetXml: string,
-  sharedStrings: string[],
-): Array<{ rowNumber: number; values: string[] }> {
-  const rows: Array<{ rowNumber: number; values: string[] }> = [];
+function parseWorksheetRows(worksheetXml: string, sharedStrings: string[]): ParsedRow[] {
+  const rows: ParsedRow[] = [];
   let implicitRow = 0;
 
   for (const rowMatch of worksheetXml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/gi)) {
@@ -272,6 +376,7 @@ function parseWorksheetRows(
     const rowAttr = rowMatch[1];
     const rowNumber = Number(rowAttr.match(/\br=["'](\d+)["']/i)?.[1] ?? implicitRow);
     const values: string[] = [];
+    const numericColumns = new Set<number>();
 
     for (const cellMatch of rowMatch[2].matchAll(/<c\b([^>]*?)(?:>([\s\S]*?)<\/c>|\/\s*>)/gi)) {
       const attrs = cellMatch[1] ?? '';
@@ -288,15 +393,16 @@ function parseWorksheetRows(
         if (type === 's') value = sharedStrings[Number(rawValue)] ?? '';
         else if (type === 'str') value = xmlDecode(rawValue);
         else value = rawValue.trim();
+        if (value && (type === '' || type === 'n')) numericColumns.add(index);
       }
       values[index] = value;
     }
-    rows.push({ rowNumber, values });
+    rows.push({ rowNumber, values, ...(numericColumns.size ? { numericColumns } : {}) });
   }
   return rows;
 }
 
-export async function parseXlsxPhoneRows(buffer: ArrayBuffer): Promise<ImportedPhoneRow[]> {
+export async function parseXlsxPhoneRows(buffer: ArrayBuffer, phoneColumn?: number): Promise<ImportedPhoneRow[]> {
   if (buffer.byteLength > MAX_XLSX_BYTES) throw new Error('The Excel file is too large (8 MB maximum).');
   const bytes = new Uint8Array(buffer);
   const entries = findZipEntries(bytes);
@@ -323,13 +429,29 @@ export async function parseXlsxPhoneRows(buffer: ArrayBuffer): Promise<ImportedP
   }
 
   const worksheetXml = decoder.decode(await readZipEntry(bytes, worksheetEntry));
-  return selectPhoneRows(parseWorksheetRows(worksheetXml, sharedStrings));
+  return selectPhoneRows(parseWorksheetRows(worksheetXml, sharedStrings), phoneColumn);
 }
 
-export async function readPhoneRowsFromFile(file: File): Promise<ImportedPhoneRow[]> {
+export async function readPhoneRowsFromFile(file: File, phoneColumn?: number): Promise<ImportedPhoneRow[]> {
   const lower = file.name.toLowerCase();
-  if (lower.endsWith('.csv')) return parseDelimitedPhoneRows(await file.text());
-  if (lower.endsWith('.xlsx')) return parseXlsxPhoneRows(await file.arrayBuffer());
+  if (lower.endsWith('.csv')) {
+    if (file.size > MAX_CSV_BYTES) throw new Error('The CSV file is too large (4 MB maximum).');
+    return parseDelimitedPhoneRows(await file.text(), phoneColumn);
+  }
+  if (lower.endsWith('.xlsx')) {
+    if (file.size > MAX_XLSX_BYTES) throw new Error('The Excel file is too large (8 MB maximum).');
+    const rows = await parseXlsxPhoneRows(await file.arrayBuffer(), phoneColumn);
+    const unsafeRows = rows.filter(row => row.unsafeNumeric).map(row => row.sourceRow);
+    if (unsafeRows.length) {
+      const preview = unsafeRows.slice(0, 5).join(', ');
+      const suffix = unsafeRows.length > 5 ? ', …' : '';
+      throw new Error(
+        `Excel stored phone values as numeric cells on row(s) ${preview}${suffix}. ` +
+          'Numeric cells can lose leading zeros or be rewritten in scientific notation. Format the phone column as Text and re-import it.',
+      );
+    }
+    return rows;
+  }
   throw new Error('Use an .xlsx or .csv file. Legacy .xls files are not supported.');
 }
 
