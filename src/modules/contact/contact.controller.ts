@@ -114,18 +114,17 @@ export class ContactController {
   @RequireRole(ApiKeyRole.OPERATOR)
   @UseGuards(NumberCheckRateLimitGuard)
   @ApiOperation({
-    summary: 'Check if a phone number exists on WhatsApp',
+    summary: 'Check if a phone number is registered on WhatsApp',
     description:
-      'Returns whether the number is a registered WhatsApp account and its canonical id. Use this to ' +
-      'pre-validate a recipient before sending: the send endpoints return 201 on accepting a message ' +
-      'even for numbers that are not on WhatsApp, so this is the only way to confirm a new number is ' +
-      'reachable before you send to it.',
+      'Returns whether WhatsApp reports an account registered for the number and, when present, its canonical id. ' +
+      'This lookup reports registration state only; it does not guarantee message delivery, account reachability, ' +
+      'or a successful send.',
   })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
   @ApiParam({ name: 'number', description: 'Phone number to check (e.g., 628123456789)' })
   @ApiResponse({
     status: 200,
-    description: 'Number existence check result',
+    description: 'WhatsApp registration check result',
     type: NumberCheckResponseDto,
   })
   @ApiResponse({
@@ -136,9 +135,8 @@ export class ContactController {
   @ApiResponse({
     status: 503,
     description:
-      'WhatsApp did not answer the lookup. Deliberately not reported as `exists: false` — that ' +
-      'would be a claim about the number rather than about the query, and this route exists to be ' +
-      'trusted before a send.',
+      'WhatsApp did not answer the lookup. Deliberately not reported as `exists: false` because that would ' +
+      'incorrectly turn a transport/query failure into a negative registration claim.',
   })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async checkNumber(@Param('sessionId') sessionId: string, @Param('number') number: string) {

@@ -295,7 +295,7 @@ export function NumberChecker() {
     <div className="number-checker">
       <PageHeader
         title="WhatsApp Number Checker"
-        subtitle="Verify one recipient or process an authorized Excel list with live progress and exportable results."
+        subtitle="Check WhatsApp registration for one number or process an authorized Excel list with live progress and exportable results."
       />
 
       <div className="number-checker__tabs" role="tablist" aria-label="Number checker mode">
@@ -408,7 +408,7 @@ export function NumberChecker() {
                 <CheckCircle2 size={30} />
                 <div>
                   <strong>WhatsApp account found</strong>
-                  <p>This number is registered and can be addressed by the selected session.</p>
+                  <p>This number is registered on WhatsApp. Registration does not guarantee message delivery.</p>
                   <dl>
                     <div>
                       <dt>Number</dt>
