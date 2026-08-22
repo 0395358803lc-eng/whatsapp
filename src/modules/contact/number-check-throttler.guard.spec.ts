@@ -27,11 +27,7 @@ describe('NumberCheckThrottlerGuard', () => {
   });
 
   describe('tier resolution from the environment', () => {
-    const KEYS = [
-      'NUMBER_CHECK_RATE_TTL_MS',
-      'NUMBER_CHECK_KEY_SESSION_LIMIT',
-      'NUMBER_CHECK_SESSION_LIMIT',
-    ] as const;
+    const KEYS = ['NUMBER_CHECK_RATE_TTL_MS', 'NUMBER_CHECK_KEY_SESSION_LIMIT', 'NUMBER_CHECK_SESSION_LIMIT'] as const;
     const saved: Array<[string, string | undefined]> = [];
 
     beforeEach(() => {
