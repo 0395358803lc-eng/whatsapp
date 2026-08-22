@@ -1,4 +1,17 @@
-import { Body, Controller, Get, Post, Put, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Param,
+  Query,
+  HttpCode,
+  HttpStatus,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
 import { RequireRole } from '../auth/decorators/auth.decorators';
@@ -13,6 +26,9 @@ import {
   ResolvedPhoneResponseDto,
 } from './dto/contact-response.dto';
 import { ENGINE_NOT_READY_409 } from '../../common/openapi/engine-status-responses';
+import { NumberCheckThrottlerGuard } from './number-check-throttler.guard';
+
+const NUMBER_CHECK_MSISDN = /^[1-9]\d{6,14}$/;
 
 @ApiTags('contacts')
 @Controller('sessions/:sessionId/contacts')
@@ -97,6 +113,8 @@ export class ContactController {
   }
 
   @Get('check/:number')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @UseGuards(NumberCheckThrottlerGuard)
   @ApiOperation({
     summary: 'Check if a phone number exists on WhatsApp',
     description:
@@ -121,6 +139,12 @@ export class ContactController {
   })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async checkNumber(@Param('sessionId') sessionId: string, @Param('number') number: string) {
+    if (!NUMBER_CHECK_MSISDN.test(number)) {
+      throw new BadRequestException(
+        'number must be a canonical MSISDN containing 7–15 digits, starting with a non-zero country code',
+      );
+    }
+
     // The engine returns the canonical chat id in its native format; we don't build the JID here
     // (decoupled from the whatsapp-web.js `@c.us` scheme).
     const whatsappId = await this.contactService.getNumberId(sessionId, number);
