@@ -8,6 +8,11 @@ type NumberCheckRequest = Record<string, unknown> & {
   apiKey?: Pick<ApiKey, 'id'>;
 };
 
+function resolvePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  const value = resolveNonNegativeIntEnv(raw, fallback);
+  return value > 0 ? value : fallback;
+}
+
 /**
  * Dedicated rate limits for active WhatsApp number-existence lookups.
  *
@@ -28,16 +33,16 @@ type NumberCheckRequest = Record<string, unknown> & {
 export class NumberCheckThrottlerGuard extends ProxyAwareThrottlerGuard {
   async onModuleInit(): Promise<void> {
     await super.onModuleInit();
-    const ttl = resolveNonNegativeIntEnv(process.env.NUMBER_CHECK_RATE_TTL_MS, 60_000);
+    const ttl = resolvePositiveIntEnv(process.env.NUMBER_CHECK_RATE_TTL_MS, 60_000);
     this.throttlers = [
       {
         name: 'number-check-key-session',
-        limit: resolveNonNegativeIntEnv(process.env.NUMBER_CHECK_KEY_SESSION_LIMIT, 30),
+        limit: resolvePositiveIntEnv(process.env.NUMBER_CHECK_KEY_SESSION_LIMIT, 30),
         ttl,
       },
       {
         name: 'number-check-session',
-        limit: resolveNonNegativeIntEnv(process.env.NUMBER_CHECK_SESSION_LIMIT, 60),
+        limit: resolvePositiveIntEnv(process.env.NUMBER_CHECK_SESSION_LIMIT, 60),
         ttl,
         getTracker: req => this.trackSession(req),
       },
