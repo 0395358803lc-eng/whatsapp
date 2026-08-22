@@ -72,9 +72,9 @@ export class NumberCheckThrottlerGuard extends ProxyAwareThrottlerGuard {
     return super.getTracker(req);
   }
 
-  private async trackSession(req: Record<string, unknown>): Promise<string> {
+  private trackSession(req: Record<string, unknown>): Promise<string> {
     const sessionId = (req as NumberCheckRequest).params?.sessionId;
-    if (sessionId) return `number-check:session:${sessionId}`;
+    if (sessionId) return Promise.resolve(`number-check:session:${sessionId}`);
     return super.getTracker(req);
   }
 }
