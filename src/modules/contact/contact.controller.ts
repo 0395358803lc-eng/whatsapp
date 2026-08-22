@@ -1,4 +1,17 @@
-import { BadRequestException, Body, Controller, Get, Post, Put, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Param,
+  Query,
+  HttpCode,
+  HttpStatus,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
 import { RequireRole } from '../auth/decorators/auth.decorators';
@@ -13,6 +26,7 @@ import {
   ResolvedPhoneResponseDto,
 } from './dto/contact-response.dto';
 import { ENGINE_NOT_READY_409 } from '../../common/openapi/engine-status-responses';
+import { NumberCheckRateLimitGuard } from './number-check-rate-limit.guard';
 
 @ApiTags('contacts')
 @Controller('sessions/:sessionId/contacts')
@@ -98,6 +112,7 @@ export class ContactController {
 
   @Get('check/:number')
   @RequireRole(ApiKeyRole.OPERATOR)
+  @UseGuards(NumberCheckRateLimitGuard)
   @ApiOperation({
     summary: 'Check if a phone number exists on WhatsApp',
     description:
@@ -117,6 +132,7 @@ export class ContactController {
     status: 400,
     description: 'Number must be a canonical MSISDN with 7–15 digits and no leading zero',
   })
+  @ApiResponse({ status: 429, description: 'Number-check rate limit exceeded; retry after Retry-After seconds' })
   @ApiResponse({
     status: 503,
     description:
