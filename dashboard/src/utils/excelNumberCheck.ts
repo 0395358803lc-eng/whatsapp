@@ -1,6 +1,7 @@
 export interface ImportedPhoneRow {
   sourceRow: number;
   original: string;
+  unsafeNumeric?: boolean;
 }
 
 export interface ExportNumberCheckRow {
@@ -23,6 +24,12 @@ export class PhoneColumnRequiredError extends Error {
     super('No recognized phone-number header was found. Select the phone column explicitly.');
     this.name = 'PhoneColumnRequiredError';
   }
+}
+
+interface ParsedRow {
+  rowNumber: number;
+  values: string[];
+  numericColumns?: Set<number>;
 }
 
 const PHONE_HEADERS = new Set([
@@ -117,10 +124,7 @@ function columnOptions(firstRow: string[]): PhoneColumnOption[] {
   });
 }
 
-function selectPhoneRows(
-  rows: Array<{ rowNumber: number; values: string[] }>,
-  explicitPhoneColumn?: number,
-): ImportedPhoneRow[] {
+function selectPhoneRows(rows: ParsedRow[], explicitPhoneColumn?: number): ImportedPhoneRow[] {
   const firstIndex = rows.findIndex(row => row.values.some(value => value.trim()));
   if (firstIndex === -1) return [];
 
@@ -137,7 +141,8 @@ function selectPhoneRows(
   for (let i = firstIndex + 1; i < rows.length; i += 1) {
     const original = (rows[i].values[phoneColumn] ?? '').trim();
     if (!original) continue;
-    result.push({ sourceRow: rows[i].rowNumber, original });
+    const unsafeNumeric = rows[i].numericColumns?.has(phoneColumn) || undefined;
+    result.push({ sourceRow: rows[i].rowNumber, original, ...(unsafeNumeric ? { unsafeNumeric: true } : {}) });
     if (result.length > MAX_BULK_PHONE_ROWS) {
       throw new Error(`The file contains more than ${MAX_BULK_PHONE_ROWS} phone rows. Split it into smaller files.`);
     }
@@ -362,11 +367,8 @@ function resolveWorksheetPath(workbookXml: string, relsXml: string, entries: Zip
   return entries.find(entry => /^xl\/worksheets\/sheet\d+\.xml$/i.test(entry.name))?.name ?? '';
 }
 
-function parseWorksheetRows(
-  worksheetXml: string,
-  sharedStrings: string[],
-): Array<{ rowNumber: number; values: string[] }> {
-  const rows: Array<{ rowNumber: number; values: string[] }> = [];
+function parseWorksheetRows(worksheetXml: string, sharedStrings: string[]): ParsedRow[] {
+  const rows: ParsedRow[] = [];
   let implicitRow = 0;
 
   for (const rowMatch of worksheetXml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/gi)) {
@@ -374,6 +376,7 @@ function parseWorksheetRows(
     const rowAttr = rowMatch[1];
     const rowNumber = Number(rowAttr.match(/\br=["'](\d+)["']/i)?.[1] ?? implicitRow);
     const values: string[] = [];
+    const numericColumns = new Set<number>();
 
     for (const cellMatch of rowMatch[2].matchAll(/<c\b([^>]*?)(?:>([\s\S]*?)<\/c>|\/\s*>)/gi)) {
       const attrs = cellMatch[1] ?? '';
@@ -390,10 +393,11 @@ function parseWorksheetRows(
         if (type === 's') value = sharedStrings[Number(rawValue)] ?? '';
         else if (type === 'str') value = xmlDecode(rawValue);
         else value = rawValue.trim();
+        if (value && (type === '' || type === 'n')) numericColumns.add(index);
       }
       values[index] = value;
     }
-    rows.push({ rowNumber, values });
+    rows.push({ rowNumber, values, ...(numericColumns.size ? { numericColumns } : {}) });
   }
   return rows;
 }
@@ -436,7 +440,17 @@ export async function readPhoneRowsFromFile(file: File, phoneColumn?: number): P
   }
   if (lower.endsWith('.xlsx')) {
     if (file.size > MAX_XLSX_BYTES) throw new Error('The Excel file is too large (8 MB maximum).');
-    return parseXlsxPhoneRows(await file.arrayBuffer(), phoneColumn);
+    const rows = await parseXlsxPhoneRows(await file.arrayBuffer(), phoneColumn);
+    const unsafeRows = rows.filter(row => row.unsafeNumeric).map(row => row.sourceRow);
+    if (unsafeRows.length) {
+      const preview = unsafeRows.slice(0, 5).join(', ');
+      const suffix = unsafeRows.length > 5 ? ', …' : '';
+      throw new Error(
+        `Excel stored phone values as numeric cells on row(s) ${preview}${suffix}. ` +
+          'Numeric cells can lose leading zeros or be rewritten in scientific notation. Format the phone column as Text and re-import it.',
+      );
+    }
+    return rows;
   }
   throw new Error('Use an .xlsx or .csv file. Legacy .xls files are not supported.');
 }

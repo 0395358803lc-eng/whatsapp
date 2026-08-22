@@ -27,6 +27,35 @@ function findSignature(bytes: Uint8Array, signature: number, fromEnd = false): n
   return -1;
 }
 
+function findBytes(bytes: Uint8Array, needle: Uint8Array): number {
+  outer: for (let offset = 0; offset <= bytes.length - needle.length; offset += 1) {
+    for (let index = 0; index < needle.length; index += 1) {
+      if (bytes[offset + index] !== needle[index]) continue outer;
+    }
+    return offset;
+  }
+  return -1;
+}
+
+function replaceAsciiSameLength(bytes: Uint8Array, from: string, to: string): Uint8Array {
+  assert.ok(to.length <= from.length, 'replacement must fit without changing ZIP entry sizes');
+  const encoder = new TextEncoder();
+  const needle = encoder.encode(from);
+  const offset = findBytes(bytes, needle);
+  assert.ok(offset >= 0, `could not find ${from}`);
+  bytes.set(encoder.encode(to.padEnd(from.length, ' ')), offset);
+  return bytes;
+}
+
+function numericPhoneWorkbook(): Uint8Array {
+  const bytes = buildXlsxBytes([['phone_number'], ['901234567']], 'Input').slice();
+  return replaceAsciiSameLength(
+    bytes,
+    't="inlineStr"><is><t xml:space="preserve">901234567</t></is>',
+    't="n"><v>901234567</v>',
+  );
+}
+
 test('CSV import detects a phone header and keeps source row numbers', () => {
   const rows = parseDelimitedPhoneRows('name,phone_number\nAlice,+84901234567\nBob,+14155552671\n');
   assert.deepEqual(rows, [
@@ -120,6 +149,27 @@ test('XLSX import requires explicit column selection when no phone header is rec
     { sourceRow: 2, original: '+84901234567' },
     { sourceRow: 3, original: '+14155552671' },
   ]);
+});
+
+test('XLSX parser flags numeric phone cells as unsafe instead of guessing lost formatting', async () => {
+  const rows = await parseXlsxPhoneRows(toArrayBuffer(numericPhoneWorkbook()));
+  assert.deepEqual(rows, [{ sourceRow: 2, original: '901234567', unsafeNumeric: true }]);
+});
+
+test('file import blocks unsafe numeric phone cells and tells the operator to use Text format', async () => {
+  const bytes = numericPhoneWorkbook();
+  const file = {
+    name: 'numeric-phones.xlsx',
+    size: bytes.byteLength,
+    arrayBuffer: async () => toArrayBuffer(bytes),
+  } as File;
+
+  await assert.rejects(readPhoneRowsFromFile(file), /Format the phone column as Text and re-import it/);
+});
+
+test('generated template keeps phone examples as text cells', async () => {
+  const rows = await parseXlsxPhoneRows(toArrayBuffer(buildNumberCheckTemplateXlsx()));
+  assert.equal(rows.some(row => row.unsafeNumeric), false);
 });
 
 test('rejects malformed and truncated XLSX ZIP data', async () => {
