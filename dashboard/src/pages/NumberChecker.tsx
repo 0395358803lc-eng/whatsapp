@@ -20,9 +20,11 @@ import {
   buildNumberCheckResultsXlsx,
   buildNumberCheckTemplateXlsx,
   MAX_BULK_PHONE_ROWS,
+  PhoneColumnRequiredError,
   readPhoneRowsFromFile,
   type ExportNumberCheckRow,
   type ImportedPhoneRow,
+  type PhoneColumnOption,
 } from '../utils/excelNumberCheck';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
 import './NumberChecker.css';
@@ -135,6 +137,9 @@ export function NumberChecker() {
   const [bulkFileError, setBulkFileError] = useState('');
   const [bulkRunning, setBulkRunning] = useState(false);
   const [bulkDelayMs, setBulkDelayMs] = useState(2000);
+  const [pendingBulkFile, setPendingBulkFile] = useState<File | null>(null);
+  const [phoneColumnOptions, setPhoneColumnOptions] = useState<PhoneColumnOption[]>([]);
+  const [selectedPhoneColumn, setSelectedPhoneColumn] = useState('');
   const bulkAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -198,20 +203,52 @@ export function NumberChecker() {
     }
   };
 
+  const clearColumnSelection = () => {
+    setPendingBulkFile(null);
+    setPhoneColumnOptions([]);
+    setSelectedPhoneColumn('');
+  };
+
+  const applyImportedRows = (file: File, imported: ImportedPhoneRow[]) => {
+    if (!imported.length) throw new Error('No phone numbers were found in the first worksheet.');
+    setBulkFileName(file.name);
+    setBulkRows(createBulkRows(imported, countryCode));
+    setBulkFileError('');
+    clearColumnSelection();
+  };
+
   const handleBulkFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file || bulkRunning) return;
     setBulkFileError('');
+    clearColumnSelection();
     try {
-      const imported = await readPhoneRowsFromFile(file);
-      if (!imported.length) throw new Error('No phone numbers were found in the first worksheet.');
-      setBulkFileName(file.name);
-      setBulkRows(createBulkRows(imported, countryCode));
+      applyImportedRows(file, await readPhoneRowsFromFile(file));
     } catch (error) {
-      setBulkFileName('');
       setBulkRows([]);
-      setBulkFileError(error instanceof Error ? error.message : 'Could not read this file.');
+      if (error instanceof PhoneColumnRequiredError) {
+        setBulkFileName(file.name);
+        setPendingBulkFile(file);
+        setPhoneColumnOptions(error.columns);
+        setSelectedPhoneColumn(error.columns[0] ? String(error.columns[0].index) : '');
+        setBulkFileError('No recognized phone header was found. Choose the phone column before importing.');
+      } else {
+        setBulkFileName('');
+        setBulkFileError(error instanceof Error ? error.message : 'Could not read this file.');
+      }
+    }
+  };
+
+  const handleUseSelectedPhoneColumn = async () => {
+    if (!pendingBulkFile || selectedPhoneColumn === '' || bulkRunning) return;
+    setBulkFileError('');
+    try {
+      const imported = await readPhoneRowsFromFile(pendingBulkFile, Number(selectedPhoneColumn));
+      applyImportedRows(pendingBulkFile, imported);
+    } catch (error) {
+      setBulkRows([]);
+      setBulkFileError(error instanceof Error ? error.message : 'Could not read the selected phone column.');
     }
   };
 
@@ -618,9 +655,35 @@ export function NumberChecker() {
 
               <p className="number-checker__hint">
                 The first worksheet is read. Use a column named <code>phone_number</code>, <code>phone</code>,{' '}
-                <code>mobile</code>, <code>msisdn</code>, or <code>Số điện thoại</code>. Maximum {MAX_BULK_PHONE_ROWS}{' '}
-                non-empty rows per file.
+                <code>mobile</code>, <code>msisdn</code>, or <code>Số điện thoại</code>. If no known header is found,
+                you must choose the phone column explicitly. Maximum {MAX_BULK_PHONE_ROWS} non-empty rows per file.
               </p>
+              {pendingBulkFile && phoneColumnOptions.length > 0 && (
+                <div className="number-checker__bulk-row">
+                  <label>
+                    Phone column
+                    <select
+                      value={selectedPhoneColumn}
+                      onChange={event => setSelectedPhoneColumn(event.target.value)}
+                      disabled={bulkRunning}
+                    >
+                      {phoneColumnOptions.map(option => (
+                        <option key={option.index} value={option.index}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="number-checker__secondary"
+                    onClick={handleUseSelectedPhoneColumn}
+                    disabled={bulkRunning || selectedPhoneColumn === ''}
+                  >
+                    Use selected column
+                  </button>
+                </div>
+              )}
               <div className="number-checker__bulk-notice">
                 <CircleAlert size={18} />
                 <span>

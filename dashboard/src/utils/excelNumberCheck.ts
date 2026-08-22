@@ -13,6 +13,18 @@ export interface ExportNumberCheckRow {
   checkedAt?: string;
 }
 
+export interface PhoneColumnOption {
+  index: number;
+  label: string;
+}
+
+export class PhoneColumnRequiredError extends Error {
+  constructor(public readonly columns: PhoneColumnOption[]) {
+    super('No recognized phone-number header was found. Select the phone column explicitly.');
+    this.name = 'PhoneColumnRequiredError';
+  }
+}
+
 const PHONE_HEADERS = new Set([
   'phone',
   'phone number',
@@ -94,22 +106,35 @@ function extractTextRuns(xml: string): string {
   return parts.join('');
 }
 
-function selectPhoneRows(rows: Array<{ rowNumber: number; values: string[] }>): ImportedPhoneRow[] {
+function columnOptions(firstRow: string[]): PhoneColumnOption[] {
+  const width = Math.max(1, firstRow.length);
+  return Array.from({ length: width }, (_, index) => {
+    const header = (firstRow[index] ?? '').trim();
+    return {
+      index,
+      label: header ? `${columnName(index)} — ${header}` : `Column ${columnName(index)}`,
+    };
+  });
+}
+
+function selectPhoneRows(
+  rows: Array<{ rowNumber: number; values: string[] }>,
+  explicitPhoneColumn?: number,
+): ImportedPhoneRow[] {
   const firstIndex = rows.findIndex(row => row.values.some(value => value.trim()));
   if (firstIndex === -1) return [];
 
   const first = rows[firstIndex];
-  let phoneColumn = first.values.findIndex(value => PHONE_HEADERS.has(normalizeHeader(value)));
-  let dataStart = firstIndex + 1;
+  const detectedPhoneColumn = first.values.findIndex(value => PHONE_HEADERS.has(normalizeHeader(value)));
+  const phoneColumn = explicitPhoneColumn ?? detectedPhoneColumn;
 
-  if (phoneColumn === -1) {
-    phoneColumn = first.values.findIndex(value => value.trim());
-    dataStart = firstIndex;
+  if (phoneColumn < 0) throw new PhoneColumnRequiredError(columnOptions(first.values));
+  if (!Number.isInteger(phoneColumn) || phoneColumn >= Math.max(1, first.values.length)) {
+    throw new Error('The selected phone column is not present in this file.');
   }
-  if (phoneColumn === -1) return [];
 
   const result: ImportedPhoneRow[] = [];
-  for (let i = dataStart; i < rows.length; i += 1) {
+  for (let i = firstIndex + 1; i < rows.length; i += 1) {
     const original = (rows[i].values[phoneColumn] ?? '').trim();
     if (!original) continue;
     result.push({ sourceRow: rows[i].rowNumber, original });
@@ -140,7 +165,7 @@ function detectDelimiter(text: string): string {
   return winner;
 }
 
-export function parseDelimitedPhoneRows(text: string): ImportedPhoneRow[] {
+export function parseDelimitedPhoneRows(text: string, phoneColumn?: number): ImportedPhoneRow[] {
   const clean = text.replace(/^\uFEFF/, '');
   const delimiter = detectDelimiter(clean);
   const table: string[][] = [];
@@ -177,7 +202,10 @@ export function parseDelimitedPhoneRows(text: string): ImportedPhoneRow[] {
     }
   }
 
-  return selectPhoneRows(table.map((values, index) => ({ rowNumber: index + 1, values })));
+  return selectPhoneRows(
+    table.map((values, index) => ({ rowNumber: index + 1, values })),
+    phoneColumn,
+  );
 }
 
 interface ZipEntry {
@@ -370,7 +398,7 @@ function parseWorksheetRows(
   return rows;
 }
 
-export async function parseXlsxPhoneRows(buffer: ArrayBuffer): Promise<ImportedPhoneRow[]> {
+export async function parseXlsxPhoneRows(buffer: ArrayBuffer, phoneColumn?: number): Promise<ImportedPhoneRow[]> {
   if (buffer.byteLength > MAX_XLSX_BYTES) throw new Error('The Excel file is too large (8 MB maximum).');
   const bytes = new Uint8Array(buffer);
   const entries = findZipEntries(bytes);
@@ -397,18 +425,18 @@ export async function parseXlsxPhoneRows(buffer: ArrayBuffer): Promise<ImportedP
   }
 
   const worksheetXml = decoder.decode(await readZipEntry(bytes, worksheetEntry));
-  return selectPhoneRows(parseWorksheetRows(worksheetXml, sharedStrings));
+  return selectPhoneRows(parseWorksheetRows(worksheetXml, sharedStrings), phoneColumn);
 }
 
-export async function readPhoneRowsFromFile(file: File): Promise<ImportedPhoneRow[]> {
+export async function readPhoneRowsFromFile(file: File, phoneColumn?: number): Promise<ImportedPhoneRow[]> {
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.csv')) {
     if (file.size > MAX_CSV_BYTES) throw new Error('The CSV file is too large (4 MB maximum).');
-    return parseDelimitedPhoneRows(await file.text());
+    return parseDelimitedPhoneRows(await file.text(), phoneColumn);
   }
   if (lower.endsWith('.xlsx')) {
     if (file.size > MAX_XLSX_BYTES) throw new Error('The Excel file is too large (8 MB maximum).');
-    return parseXlsxPhoneRows(await file.arrayBuffer());
+    return parseXlsxPhoneRows(await file.arrayBuffer(), phoneColumn);
   }
   throw new Error('Use an .xlsx or .csv file. Legacy .xls files are not supported.');
 }

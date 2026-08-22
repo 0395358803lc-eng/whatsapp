@@ -5,6 +5,7 @@ import {
   buildXlsxBytes,
   parseDelimitedPhoneRows,
   parseXlsxPhoneRows,
+  PhoneColumnRequiredError,
   readPhoneRowsFromFile,
 } from './excelNumberCheck.ts';
 
@@ -37,6 +38,22 @@ test('CSV import detects a phone header and keeps source row numbers', () => {
 test('CSV import supports semicolon files and Vietnamese headers', () => {
   const rows = parseDelimitedPhoneRows('Tên;Số điện thoại\nAn;84901234567\n');
   assert.deepEqual(rows, [{ sourceRow: 2, original: '84901234567' }]);
+});
+
+test('CSV import requires explicit column selection when no phone header is recognized', () => {
+  const csv = 'customer,contact_value\nAlice,+84901234567\nBob,+14155552671\n';
+  assert.throws(
+    () => parseDelimitedPhoneRows(csv),
+    error =>
+      error instanceof PhoneColumnRequiredError &&
+      error.columns.length === 2 &&
+      error.columns[1].label === 'B — contact_value',
+  );
+
+  assert.deepEqual(parseDelimitedPhoneRows(csv, 1), [
+    { sourceRow: 2, original: '+84901234567' },
+    { sourceRow: 3, original: '+14155552671' },
+  ]);
 });
 
 test('rejects oversized CSV before materializing its text', async () => {
@@ -80,6 +97,26 @@ test('XLSX writer produces a workbook the importer can read', async () => {
   );
   const rows = await parseXlsxPhoneRows(toArrayBuffer(bytes));
   assert.deepEqual(rows, [
+    { sourceRow: 2, original: '+84901234567' },
+    { sourceRow: 3, original: '+14155552671' },
+  ]);
+});
+
+test('XLSX import requires explicit column selection when no phone header is recognized', async () => {
+  const bytes = buildXlsxBytes(
+    [
+      ['customer', 'contact_value'],
+      ['Alice', '+84901234567'],
+      ['Bob', '+14155552671'],
+    ],
+    'Input',
+  );
+
+  await assert.rejects(
+    parseXlsxPhoneRows(toArrayBuffer(bytes)),
+    error => error instanceof PhoneColumnRequiredError && error.columns[1].label === 'B — contact_value',
+  );
+  assert.deepEqual(await parseXlsxPhoneRows(toArrayBuffer(bytes), 1), [
     { sourceRow: 2, original: '+84901234567' },
     { sourceRow: 3, original: '+14155552671' },
   ]);
