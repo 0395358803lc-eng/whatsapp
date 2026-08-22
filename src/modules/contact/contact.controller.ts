@@ -10,6 +10,7 @@ import {
   Query,
   HttpCode,
   HttpStatus,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
@@ -25,6 +26,7 @@ import {
   ResolvedPhoneResponseDto,
 } from './dto/contact-response.dto';
 import { ENGINE_NOT_READY_409 } from '../../common/openapi/engine-status-responses';
+import { NumberCheckThrottlerGuard } from './number-check-throttler.guard';
 
 const NUMBER_CHECK_MSISDN = /^[1-9]\d{6,14}$/;
 
@@ -112,6 +114,7 @@ export class ContactController {
 
   @Get('check/:number')
   @RequireRole(ApiKeyRole.OPERATOR)
+  @UseGuards(NumberCheckThrottlerGuard)
   @ApiOperation({
     summary: 'Check if a phone number exists on WhatsApp',
     description:
@@ -130,6 +133,11 @@ export class ContactController {
     status: 200,
     description: 'Number existence check result',
     type: NumberCheckResponseDto,
+  })
+  @ApiResponse({
+    status: 429,
+    description:
+      'Number-check rate limit exceeded for this API-key/session or for the WhatsApp session as a whole. Retry after the named number-check tier resets.',
   })
   @ApiResponse({
     status: 503,
