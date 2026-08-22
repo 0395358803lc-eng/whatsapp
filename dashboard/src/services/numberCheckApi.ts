@@ -1,4 +1,4 @@
-import { API_BASE_URL, type CheckNumberResponse } from './api';
+import type { CheckNumberResponse } from './api';
 
 export interface NumberCheckRequestError extends Error {
   status?: number;
@@ -27,6 +27,9 @@ export interface NumberCheckRetryNotice {
 
 const MAX_RETRIES = 2;
 const MAX_BACKOFF_MS = 30_000;
+const VITE_ENV = (import.meta as ImportMeta & { env?: { VITE_API_URL?: string } }).env;
+const API_ORIGIN = (VITE_ENV?.VITE_API_URL ?? '').replace(/\/+$/, '');
+const NUMBER_CHECK_API_BASE_URL = `${API_ORIGIN}/api`;
 
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
@@ -72,7 +75,7 @@ export async function checkNumberAbortable(
 ): Promise<CheckNumberResponse> {
   const apiKey = sessionStorage.getItem('openwa_api_key');
   const response = await fetch(
-    `${API_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/contacts/check/${encodeURIComponent(number)}`,
+    `${NUMBER_CHECK_API_BASE_URL}/sessions/${encodeURIComponent(sessionId)}/contacts/check/${encodeURIComponent(number)}`,
     {
       signal,
       headers: { ...(apiKey ? { 'X-API-Key': apiKey } : {}) },
