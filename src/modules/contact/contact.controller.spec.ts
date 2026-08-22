@@ -56,7 +56,7 @@ describe('ContactController', () => {
     expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, ContactController.prototype.checkNumber)).toBe(ApiKeyRole.OPERATOR);
   });
 
-  it.each(['', '01234567', '628123', '1234567890123456', '+6281234567', '62812abc']) (
+  it.each(['', '01234567', '628123', '1234567890123456', '+6281234567', '62812abc'])(
     'checkNumber rejects non-canonical MSISDN %p before touching the engine',
     async number => {
       await expect(controller.checkNumber('s1', number)).rejects.toThrow('canonical MSISDN');
