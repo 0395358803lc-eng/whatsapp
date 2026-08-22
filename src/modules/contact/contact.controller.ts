@@ -116,32 +116,26 @@ export class ContactController {
   @RequireRole(ApiKeyRole.OPERATOR)
   @UseGuards(NumberCheckThrottlerGuard)
   @ApiOperation({
-    summary: 'Check if a phone number is registered on WhatsApp',
+    summary: 'Check if a phone number exists on WhatsApp',
     description:
-      'Returns whether WhatsApp reports the number as registered and, when present, its canonical id. ' +
-      'This is a registration/existence check only; it does not guarantee that a later message will be delivered.',
-  })
-  @ApiParam({
-    name: 'number',
-    description: 'Canonical MSISDN digits only, 7–15 digits and no trunk prefix (e.g., 628123456789)',
+      'Returns whether the number is a registered WhatsApp account and its canonical id. Use this to ' +
+      'pre-validate a recipient before sending: the send endpoints return 201 on accepting a message ' +
+      'even for numbers that are not on WhatsApp, so this is the only way to confirm a new number is ' +
+      'reachable before you send to it.',
   })
   @ApiParam({ name: 'sessionId', description: 'Session ID' })
-  @ApiResponse({ status: 400, description: 'Invalid canonical MSISDN' })
+  @ApiParam({ name: 'number', description: 'Phone number to check (e.g., 628123456789)' })
   @ApiResponse({
     status: 200,
-    description: 'Number registration check result',
+    description: 'Number existence check result',
     type: NumberCheckResponseDto,
-  })
-  @ApiResponse({
-    status: 429,
-    description:
-      'Number-check rate limit exceeded for this API-key/session or for the WhatsApp session as a whole. Retry after the named number-check tier resets.',
   })
   @ApiResponse({
     status: 503,
     description:
       'WhatsApp did not answer the lookup. Deliberately not reported as `exists: false` — that ' +
-      'would be a claim about the number rather than about the query.',
+      'would be a claim about the number rather than about the query, and this route exists to be ' +
+      'trusted before a send.',
   })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async checkNumber(@Param('sessionId') sessionId: string, @Param('number') number: string) {
