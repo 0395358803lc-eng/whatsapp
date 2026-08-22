@@ -27,7 +27,11 @@ describe('NumberCheckThrottlerGuard', () => {
   });
 
   describe('tier resolution from the environment', () => {
-    const KEYS = ['NUMBER_CHECK_RATE_TTL_MS', 'NUMBER_CHECK_KEY_SESSION_LIMIT', 'NUMBER_CHECK_SESSION_LIMIT'] as const;
+    const KEYS = [
+      'NUMBER_CHECK_RATE_TTL_MS',
+      'NUMBER_CHECK_KEY_SESSION_LIMIT',
+      'NUMBER_CHECK_SESSION_LIMIT',
+    ] as const;
     const saved: Array<[string, string | undefined]> = [];
 
     beforeEach(() => {
@@ -50,7 +54,9 @@ describe('NumberCheckThrottlerGuard', () => {
         throttlers: Tier[];
         onModuleInit(): Promise<void>;
       };
-      jest.spyOn(Object.getPrototypeOf(NumberCheckThrottlerGuard.prototype), 'onModuleInit').mockResolvedValue(undefined);
+      jest
+        .spyOn(Object.getPrototypeOf(NumberCheckThrottlerGuard.prototype), 'onModuleInit')
+        .mockResolvedValue(undefined);
       await guard.onModuleInit();
       return guard.throttlers;
     };
@@ -62,6 +68,16 @@ describe('NumberCheckThrottlerGuard', () => {
       process.env.NUMBER_CHECK_RATE_TTL_MS = blank;
       process.env.NUMBER_CHECK_KEY_SESSION_LIMIT = blank;
       process.env.NUMBER_CHECK_SESSION_LIMIT = blank;
+      expect(sizes(await resolveTiers())).toEqual([
+        { name: 'number-check-key-session', limit: 30, ttl: 60000 },
+        { name: 'number-check-session', limit: 60, ttl: 60000 },
+      ]);
+    });
+
+    it('falls back from zero values instead of self-DoSing the route', async () => {
+      process.env.NUMBER_CHECK_RATE_TTL_MS = '0';
+      process.env.NUMBER_CHECK_KEY_SESSION_LIMIT = '0';
+      process.env.NUMBER_CHECK_SESSION_LIMIT = '0';
       expect(sizes(await resolveTiers())).toEqual([
         { name: 'number-check-key-session', limit: 30, ttl: 60000 },
         { name: 'number-check-session', limit: 60, ttl: 60000 },
