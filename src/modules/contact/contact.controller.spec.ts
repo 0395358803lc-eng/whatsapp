@@ -1,3 +1,5 @@
+import { REQUIRED_ROLE_KEY } from '../auth/decorators/auth.decorators';
+import { ApiKeyRole } from '../auth/entities/api-key.entity';
 import { ContactController } from './contact.controller';
 import { ContactService } from './contact.service';
 
@@ -48,6 +50,10 @@ describe('ContactController', () => {
     service.getContactById.mockResolvedValue({ id: 'c1' });
     await controller.findOne('s1', 'c1');
     expect(service.getContactById).toHaveBeenCalledWith('s1', 'c1');
+  });
+
+  it('requires operator permission for number checks', () => {
+    expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, ContactController.prototype.checkNumber)).toBe(ApiKeyRole.OPERATOR);
   });
 
   it('checkNumber maps a null whatsappId to exists:false', async () => {
