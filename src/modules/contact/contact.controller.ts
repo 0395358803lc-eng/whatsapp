@@ -116,12 +116,10 @@ export class ContactController {
   @RequireRole(ApiKeyRole.OPERATOR)
   @UseGuards(NumberCheckThrottlerGuard)
   @ApiOperation({
-    summary: 'Check if a phone number exists on WhatsApp',
+    summary: 'Check if a phone number is registered on WhatsApp',
     description:
-      'Returns whether the number is a registered WhatsApp account and its canonical id. Use this to ' +
-      'pre-validate a recipient before sending: the send endpoints return 201 on accepting a message ' +
-      'even for numbers that are not on WhatsApp, so this is the only way to confirm a new number is ' +
-      'reachable before you send to it.',
+      'Returns whether WhatsApp reports the number as registered and, when present, its canonical id. ' +
+      'This is a registration/existence check only; it does not guarantee that a later message will be delivered.',
   })
   @ApiParam({
     name: 'number',
@@ -131,7 +129,7 @@ export class ContactController {
   @ApiResponse({ status: 400, description: 'Invalid canonical MSISDN' })
   @ApiResponse({
     status: 200,
-    description: 'Number existence check result',
+    description: 'Number registration check result',
     type: NumberCheckResponseDto,
   })
   @ApiResponse({
@@ -143,8 +141,7 @@ export class ContactController {
     status: 503,
     description:
       'WhatsApp did not answer the lookup. Deliberately not reported as `exists: false` — that ' +
-      'would be a claim about the number rather than about the query, and this route exists to be ' +
-      'trusted before a send.',
+      'would be a claim about the number rather than about the query.',
   })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async checkNumber(@Param('sessionId') sessionId: string, @Param('number') number: string) {
