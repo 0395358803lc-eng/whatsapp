@@ -56,21 +56,37 @@ describe('ContactController', () => {
     expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, ContactController.prototype.checkNumber)).toBe(ApiKeyRole.OPERATOR);
   });
 
+  it.each(['', '01234567', '628123', '1234567890123456', '+6281234567', '62812abc']) (
+    'checkNumber rejects non-canonical MSISDN %p before touching the engine',
+    async number => {
+      await expect(controller.checkNumber('s1', number)).rejects.toThrow('canonical MSISDN');
+      expect(service.getNumberId).not.toHaveBeenCalled();
+    },
+  );
+
+  it('checkNumber accepts the 7 and 15 digit E.164-like boundaries', async () => {
+    service.getNumberId.mockResolvedValue(null);
+    await controller.checkNumber('s1', '1234567');
+    await controller.checkNumber('s1', '123456789012345');
+    expect(service.getNumberId).toHaveBeenNthCalledWith(1, 's1', '1234567');
+    expect(service.getNumberId).toHaveBeenNthCalledWith(2, 's1', '123456789012345');
+  });
+
   it('checkNumber maps a null whatsappId to exists:false', async () => {
     service.getNumberId.mockResolvedValue(null);
-    await expect(controller.checkNumber('s1', '628123')).resolves.toEqual({
-      number: '628123',
+    await expect(controller.checkNumber('s1', '6281234')).resolves.toEqual({
+      number: '6281234',
       exists: false,
       whatsappId: null,
     });
   });
 
   it('checkNumber returns the canonical id when the number exists', async () => {
-    service.getNumberId.mockResolvedValue('628123@c.us');
-    await expect(controller.checkNumber('s1', '628123')).resolves.toEqual({
-      number: '628123',
+    service.getNumberId.mockResolvedValue('6281234@c.us');
+    await expect(controller.checkNumber('s1', '6281234')).resolves.toEqual({
+      number: '6281234',
       exists: true,
-      whatsappId: '628123@c.us',
+      whatsappId: '6281234@c.us',
     });
   });
 
