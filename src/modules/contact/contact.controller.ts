@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Put, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Put, Delete, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { ContactService } from './contact.service';
 import { RequireRole } from '../auth/decorators/auth.decorators';
@@ -114,6 +114,10 @@ export class ContactController {
     type: NumberCheckResponseDto,
   })
   @ApiResponse({
+    status: 400,
+    description: 'Number must be a canonical MSISDN with 7–15 digits and no leading zero',
+  })
+  @ApiResponse({
     status: 503,
     description:
       'WhatsApp did not answer the lookup. Deliberately not reported as `exists: false` — that ' +
@@ -122,6 +126,9 @@ export class ContactController {
   })
   @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
   async checkNumber(@Param('sessionId') sessionId: string, @Param('number') number: string) {
+    if (!/^[1-9]\d{6,14}$/.test(number)) {
+      throw new BadRequestException('Number must be a canonical MSISDN with 7–15 digits and no leading zero');
+    }
     // The engine returns the canonical chat id in its native format; we don't build the JID here
     // (decoupled from the whatsapp-web.js `@c.us` scheme).
     const whatsappId = await this.contactService.getNumberId(sessionId, number);
