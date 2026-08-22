@@ -15,7 +15,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useSessionsQuery } from '../hooks/queries';
 import { contactApi, type CheckNumberResponse } from '../services/api';
-import { checkNumberAbortable } from '../services/numberCheckApi';
+import { checkNumberWithRetry, NumberCheckFailure } from '../services/numberCheckApi';
 import {
   buildNumberCheckResultsXlsx,
   buildNumberCheckTemplateXlsx,
@@ -251,8 +251,15 @@ export function NumberChecker() {
 
     type CachedResult = Pick<BulkRow, 'status' | 'whatsappId' | 'details' | 'checkedAt'>;
     const cache = new Map<string, CachedResult>();
+    let consecutiveTransportFailures = 0;
     const publish = (index: number, patch: Partial<BulkRow>) => {
       working[index] = { ...working[index], ...patch };
+      setBulkRows([...working]);
+    };
+    const stopRemaining = (message: string) => {
+      working = working.map(item =>
+        item.status === 'queued' ? { ...item, status: 'cancelled' as const, details: message } : item,
+      );
       setBulkRows([...working]);
     };
 
@@ -274,30 +281,93 @@ export function NumberChecker() {
         }
 
         publish(index, { status: 'checking', details: 'Querying WhatsApp…' });
-        let cachedResult: CachedResult;
+        let result: CachedResult;
         try {
-          const data = await checkNumberAbortable(sessionId, row.normalized, controller.signal);
-          cachedResult = {
+          const data = await checkNumberWithRetry(sessionId, row.normalized, controller.signal, notice => {
+            const seconds = Math.max(1, Math.ceil(notice.delayMs / 1000));
+            publish(index, {
+              status: 'checking',
+              details: `Temporary lookup failure${notice.status ? ` (${notice.status})` : ''}; retrying in ${seconds}s…`,
+            });
+          });
+          consecutiveTransportFailures = 0;
+          result = {
             status: data.exists ? 'registered' : 'not_registered',
             whatsappId: data.whatsappId,
             details: data.exists ? 'WhatsApp account confirmed.' : 'WhatsApp confirmed no account for this number.',
             checkedAt: new Date().toISOString(),
           };
+          cache.set(row.normalized, result);
         } catch (error) {
           if (isAbortError(error)) throw error;
-          const requestError = error as Error & { status?: number };
-          cachedResult = {
-            status: requestError.status === 503 ? 'unavailable' : 'error',
-            whatsappId: null,
-            details:
-              requestError.status === 503
-                ? 'WhatsApp did not answer; no registration conclusion was recorded.'
-                : requestError.message || 'Number check failed.',
-            checkedAt: new Date().toISOString(),
-          };
+
+          if (error instanceof NumberCheckFailure) {
+            if (error.kind === 'auth') {
+              publish(index, {
+                status: 'error',
+                whatsappId: null,
+                details: 'Authorization failed. Refresh credentials before continuing.',
+                checkedAt: new Date().toISOString(),
+              });
+              stopRemaining('Stopped because authorization failed.');
+              setBulkFileError('Bulk check stopped: the API key is missing, expired, or lacks permission.');
+              return;
+            }
+            if (error.kind === 'session') {
+              publish(index, {
+                status: 'error',
+                whatsappId: null,
+                details: 'Session is not ready for number checks.',
+                checkedAt: new Date().toISOString(),
+              });
+              stopRemaining('Stopped because the selected session is not ready.');
+              setBulkFileError('Bulk check stopped: the selected WhatsApp session is no longer ready.');
+              return;
+            }
+            if (error.kind === 'invalid') {
+              consecutiveTransportFailures = 0;
+              result = {
+                status: 'invalid',
+                whatsappId: null,
+                details: `Server rejected this number: ${error.message}`,
+                checkedAt: new Date().toISOString(),
+              };
+            } else if (error.kind === 'unavailable') {
+              consecutiveTransportFailures += 1;
+              result = {
+                status: 'unavailable',
+                whatsappId: null,
+                details: `No registration conclusion after bounded retries: ${error.message}`,
+                checkedAt: new Date().toISOString(),
+              };
+            } else {
+              consecutiveTransportFailures = 0;
+              result = {
+                status: 'error',
+                whatsappId: null,
+                details: error.message || 'Number check failed.',
+                checkedAt: new Date().toISOString(),
+              };
+            }
+          } else {
+            consecutiveTransportFailures += 1;
+            const requestError = error as Error;
+            result = {
+              status: 'unavailable',
+              whatsappId: null,
+              details: requestError.message || 'Number check failed without a registration conclusion.',
+              checkedAt: new Date().toISOString(),
+            };
+          }
         }
-        cache.set(row.normalized, cachedResult);
-        publish(index, cachedResult);
+
+        publish(index, result);
+
+        if (consecutiveTransportFailures >= 3) {
+          stopRemaining('Stopped after repeated transport/rate-limit failures.');
+          setBulkFileError('Bulk check paused after 3 consecutive transport or rate-limit failures.');
+          return;
+        }
 
         if (index < working.length - 1) await abortableSleep(bulkDelayMs, controller.signal);
       }

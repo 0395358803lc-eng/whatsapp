@@ -6,10 +6,59 @@ export interface NumberCheckRequestError extends Error {
   retryAfterSeconds?: number;
 }
 
+export type NumberCheckFailureKind = 'invalid' | 'auth' | 'session' | 'unavailable' | 'error';
+
+export class NumberCheckFailure extends Error {
+  constructor(
+    public readonly kind: NumberCheckFailureKind,
+    message: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'NumberCheckFailure';
+  }
+}
+
+export interface NumberCheckRetryNotice {
+  attempt: number;
+  delayMs: number;
+  status?: number;
+}
+
+const MAX_RETRIES = 2;
+const MAX_BACKOFF_MS = 30_000;
+
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number.parseInt(value, 10);
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function backoffMs(attempt: number, retryAfterSeconds?: number): number {
+  if (retryAfterSeconds !== undefined) return Math.min(retryAfterSeconds * 1000, MAX_BACKOFF_MS);
+  const base = Math.min(2000 * 2 ** attempt, MAX_BACKOFF_MS);
+  const jitter = Math.floor(Math.random() * Math.min(500, Math.max(1, Math.floor(base * 0.2))));
+  return Math.min(base + jitter, MAX_BACKOFF_MS);
 }
 
 /**
@@ -49,4 +98,42 @@ export async function checkNumberAbortable(
   }
 
   return response.json() as Promise<CheckNumberResponse>;
+}
+
+/**
+ * Retry only failures that say something about the request path/transport, never a successful
+ * `exists:false` response. 429 honours Retry-After; 503/network/5xx use bounded exponential backoff.
+ */
+export async function checkNumberWithRetry(
+  sessionId: string,
+  number: string,
+  signal: AbortSignal,
+  onRetry?: (notice: NumberCheckRetryNotice) => void,
+): Promise<CheckNumberResponse> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await checkNumberAbortable(sessionId, number, signal);
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+
+      const requestError = error as NumberCheckRequestError;
+      const status = requestError.status;
+      if (status === 400) throw new NumberCheckFailure('invalid', requestError.message, status);
+      if (status === 401 || status === 403) throw new NumberCheckFailure('auth', requestError.message, status);
+      if (status === 409) throw new NumberCheckFailure('session', requestError.message, status);
+
+      const retryable = status === 429 || status === 503 || status === undefined || (status >= 500 && status <= 599);
+      if (retryable && attempt < MAX_RETRIES) {
+        const delayMs = backoffMs(attempt, status === 429 ? requestError.retryAfterSeconds : undefined);
+        onRetry?.({ attempt: attempt + 1, delayMs, status });
+        await delay(delayMs, signal);
+        continue;
+      }
+
+      if (retryable) {
+        throw new NumberCheckFailure('unavailable', requestError.message || 'WhatsApp lookup unavailable', status);
+      }
+      throw new NumberCheckFailure('error', requestError.message || 'Number check failed', status);
+    }
+  }
 }
