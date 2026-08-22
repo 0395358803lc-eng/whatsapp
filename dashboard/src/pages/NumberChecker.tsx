@@ -15,6 +15,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useDocumentTitle } from '../hooks/useDocumentTitle';
 import { useSessionsQuery } from '../hooks/queries';
 import { contactApi, type CheckNumberResponse } from '../services/api';
+import { checkNumberAbortable } from '../services/numberCheckApi';
 import {
   buildNumberCheckResultsXlsx,
   buildNumberCheckTemplateXlsx,
@@ -51,8 +52,24 @@ const TERMINAL_BULK_STATUSES = new Set<BulkStatus>([
   'cancelled',
 ]);
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function downloadXlsx(bytes: Uint8Array, filename: string): void {
@@ -118,7 +135,7 @@ export function NumberChecker() {
   const [bulkFileError, setBulkFileError] = useState('');
   const [bulkRunning, setBulkRunning] = useState(false);
   const [bulkDelayMs, setBulkDelayMs] = useState(2000);
-  const stopBulkRef = useRef(false);
+  const bulkAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!readySessions.length) {
@@ -127,6 +144,8 @@ export function NumberChecker() {
     }
     if (!readySessions.some(item => item.id === sessionId)) setSessionId(readySessions[0].id);
   }, [readySessions, sessionId]);
+
+  useEffect(() => () => bulkAbortRef.current?.abort(), []);
 
   const normalized = normalizePhoneNumber(phone, countryCode);
   const canCheck = Boolean(sessionId && normalized.valid && state.kind !== 'checking');
@@ -217,7 +236,10 @@ export function NumberChecker() {
 
   const handleStartBulk = async () => {
     if (!sessionId || bulkRunning || !bulkRows.length) return;
-    stopBulkRef.current = false;
+
+    bulkAbortRef.current?.abort();
+    const controller = new AbortController();
+    bulkAbortRef.current = controller;
     setBulkRunning(true);
     setBulkFileError('');
 
@@ -238,11 +260,7 @@ export function NumberChecker() {
       for (let index = 0; index < working.length; index += 1) {
         const row = working[index];
         if (row.status === 'invalid') continue;
-        if (stopBulkRef.current) {
-          working = working.map(item => (item.status === 'queued' ? { ...item, status: 'cancelled' as const } : item));
-          setBulkRows([...working]);
-          break;
-        }
+        if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
         const cached = cache.get(row.normalized);
         if (cached) {
@@ -258,7 +276,7 @@ export function NumberChecker() {
         publish(index, { status: 'checking', details: 'Querying WhatsApp…' });
         let cachedResult: CachedResult;
         try {
-          const data = await contactApi.checkNumber(sessionId, row.normalized);
+          const data = await checkNumberAbortable(sessionId, row.normalized, controller.signal);
           cachedResult = {
             status: data.exists ? 'registered' : 'not_registered',
             whatsappId: data.whatsappId,
@@ -266,6 +284,7 @@ export function NumberChecker() {
             checkedAt: new Date().toISOString(),
           };
         } catch (error) {
+          if (isAbortError(error)) throw error;
           const requestError = error as Error & { status?: number };
           cachedResult = {
             status: requestError.status === 503 ? 'unavailable' : 'error',
@@ -280,15 +299,27 @@ export function NumberChecker() {
         cache.set(row.normalized, cachedResult);
         publish(index, cachedResult);
 
-        if (!stopBulkRef.current && index < working.length - 1) await sleep(bulkDelayMs);
+        if (index < working.length - 1) await abortableSleep(bulkDelayMs, controller.signal);
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        working = working.map(item =>
+          item.status === 'queued' || item.status === 'checking'
+            ? { ...item, status: 'cancelled' as const, details: 'Stopped by operator.' }
+            : item,
+        );
+        setBulkRows([...working]);
+      } else {
+        setBulkFileError(error instanceof Error ? error.message : 'Bulk number check failed.');
       }
     } finally {
+      if (bulkAbortRef.current === controller) bulkAbortRef.current = null;
       setBulkRunning(false);
     }
   };
 
   const handleStopBulk = () => {
-    stopBulkRef.current = true;
+    bulkAbortRef.current?.abort();
   };
 
   return (
