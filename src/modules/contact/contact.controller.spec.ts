@@ -53,7 +53,8 @@ describe('ContactController', () => {
   });
 
   it('requires operator permission for number checks', () => {
-    expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, ContactController.prototype.checkNumber)).toBe(ApiKeyRole.OPERATOR);
+    const handler = Object.getOwnPropertyDescriptor(ContactController.prototype, 'checkNumber')?.value as object;
+    expect(Reflect.getMetadata(REQUIRED_ROLE_KEY, handler)).toBe(ApiKeyRole.OPERATOR);
   });
 
   it.each(['', '01234567', '628123', '1234567890123456', '+6281234567', '62812abc'])(
